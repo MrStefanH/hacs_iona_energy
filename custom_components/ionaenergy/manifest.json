@@ -1,0 +1,16 @@
+{
+  "domain": "ionaenergy",
+  "name": "iONA Energy",
+  "codeowners": [
+    "@MrStefanH"
+  ],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://www.home-assistant.io/integrations/ionaenergy",
+  "homekit": {},
+  "iot_class": "cloud_polling",
+  "quality_scale": "bronze",
+  "requirements": [],
+  "ssdp": [],
+  "zeroconf": []
+}

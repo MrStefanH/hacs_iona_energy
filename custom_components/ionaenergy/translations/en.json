@@ -1,0 +1,26 @@
+{
+    "config": {
+        "abort": {
+            "already_configured": "Account is already configured",
+            "already_in_progress": "Configuration flow is already in progress"
+        },
+        "create_entry": {
+            "default": "Successfully authenticated with iONA Energy"
+        },
+        "error": {
+            "cannot_connect": "Failed to connect to iONA Energy. Please check your internet connection and try again.",
+            "invalid_auth": "Invalid authentication credentials. Please check your email and password.",
+            "unknown": "An unexpected error occurred. Please try again."
+        },
+        "step": {
+            "user": {
+                "data": {
+                    "password": "Password",
+                    "username": "Email"
+                },
+                "description": "Please enter your iONA Energy credentials.",
+                "title": "iONA Energy Authentication"
+            }
+        }
+    }
+}

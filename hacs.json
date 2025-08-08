@@ -1,0 +1,6 @@
+{
+    "name": "iONA Energy",
+    "homeassistant": "2024.7",
+    "zip_release": true,
+    "filename": "ionaenergy.zip"
+}
