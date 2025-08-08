@@ -6,11 +6,11 @@
   ],
   "config_flow": true,
   "dependencies": [],
-  "documentation": "https://www.home-assistant.io/integrations/ionaenergy",
-  "homekit": {},
+  "documentation": "https://github.com/MrStefanH/hacs_iona_energy#readme",
   "iot_class": "cloud_polling",
-  "quality_scale": "bronze",
   "requirements": [],
   "ssdp": [],
-  "zeroconf": []
+  "zeroconf": [],
+  "version": "0.0.3",
+  "issue_tracker": "https://github.com/MrStefanH/hacs_iona_energy/issues"
 }
