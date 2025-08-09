@@ -13,6 +13,7 @@ from aiohttp import ClientSession
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
 from .const import AUTH_URL, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_EXPIRES_IN
 
@@ -26,6 +27,9 @@ class IONAEnergyAPI:
         """Initialize the API client."""
         self.hass = hass
         self.session = async_get_clientsession(hass)
+        # Optional credentials for re-authentication fallback
+        self.username = config_data.get(CONF_USERNAME)
+        self.password = config_data.get(CONF_PASSWORD)
         self.access_token = config_data.get(CONF_ACCESS_TOKEN)
         self.refresh_token = config_data.get(CONF_REFRESH_TOKEN)
         self.expires_in = config_data.get(CONF_EXPIRES_IN)
@@ -86,7 +90,10 @@ class IONAEnergyAPI:
     async def _ensure_valid_token(self) -> None:
         """Ensure we have a valid access token, refresh if necessary."""
         if not self.access_token:
-            raise ValueError("No access token available")
+            # Attempt full re-authentication if possible
+            _LOGGER.debug("No access token available, attempting re-authentication")
+            await self._reauthenticate_if_possible()
+            return
 
         # Check if token is expired or will expire soon
         if self._is_token_expired():
@@ -94,8 +101,11 @@ class IONAEnergyAPI:
             try:
                 await self.refresh_access_token()
             except Exception as ex:
-                _LOGGER.error("Failed to refresh access token: %s", ex)
-                raise
+                _LOGGER.warning(
+                    "Failed to refresh access token, attempting re-authentication: %s",
+                    ex,
+                )
+                await self._reauthenticate_if_possible()
 
     async def authenticate(self, username: str, password: str) -> dict[str, Any]:
         """Authenticate with iONA Energy."""
@@ -116,6 +126,8 @@ class IONAEnergyAPI:
                     # Set token creation time for new tokens
                     self.token_created_at = time.time()
                     self.last_token_refresh = time.time()
+                    # Persist tokens and update runtime
+                    await self._update_tokens_in_config_entry(tokens)
                     return tokens
                 else:
                     raise aiohttp.ClientResponseError(
@@ -124,6 +136,13 @@ class IONAEnergyAPI:
                         status=response.status,
                         message=f"Authentication failed: {response.status}",
                     )
+
+    async def _reauthenticate_if_possible(self) -> dict[str, Any]:
+        """Attempt to re-authenticate using stored credentials if available."""
+        if not self.username or not self.password:
+            raise ValueError("No stored credentials available for re-authentication")
+        _LOGGER.debug("Attempting full re-authentication with stored credentials")
+        return await self.authenticate(self.username, self.password)
 
     async def refresh_access_token(self) -> dict[str, Any]:
         """Refresh the access token using the refresh token."""
@@ -153,17 +172,18 @@ class IONAEnergyAPI:
                     return new_tokens
                 else:
                     response_text = await response.text()
-                    _LOGGER.error(
+                    _LOGGER.warning(
                         "Token refresh failed with status %s: %s",
                         response.status,
                         response_text,
                     )
-                    raise aiohttp.ClientResponseError(
-                        response.request_info,
-                        response.history,
-                        status=response.status,
-                        message=f"Token refresh failed: {response.status}",
-                    )
+                    # Fallback to full re-authentication
+                    await self._reauthenticate_if_possible()
+                    return {
+                        "access_token": self.access_token,
+                        "refresh_token": self.refresh_token,
+                        "expires_in": self.expires_in,
+                    }
 
     async def get_initialisation_data(self) -> dict[str, Any]:
         """Get initialisation data from iONA Energy."""
@@ -185,8 +205,8 @@ class IONAEnergyAPI:
                 if response.status == 200:
                     return await response.json()
                 elif response.status == 401:
-                    # Token might be expired, try to refresh
-                    _LOGGER.debug("Received 401, attempting token refresh")
+                    # Token might be expired, try to refresh or re-auth
+                    _LOGGER.debug("Received 401, attempting token refresh or re-auth")
                     await self._ensure_valid_token()
 
                     # Retry the request with new token
@@ -198,12 +218,21 @@ class IONAEnergyAPI:
                         if retry_response.status == 200:
                             return await retry_response.json()
                         else:
-                            raise aiohttp.ClientResponseError(
-                                retry_response.request_info,
-                                retry_response.history,
-                                status=retry_response.status,
-                                message=f"Failed to get initialisation data after token refresh: {retry_response.status}",
-                            )
+                            # Try explicit re-auth then retry once more
+                            await self._reauthenticate_if_possible()
+                            headers = {"Authorization": f"Bearer {self.access_token}"}
+                            async with session.get(
+                                "https://api.n2g-iona.net/v2/initialisation",
+                                headers=headers,
+                            ) as second_retry:
+                                if second_retry.status == 200:
+                                    return await second_retry.json()
+                                raise aiohttp.ClientResponseError(
+                                    retry_response.request_info,
+                                    retry_response.history,
+                                    status=retry_response.status,
+                                    message=f"Failed to get initialisation data after re-auth: {retry_response.status}",
+                                )
                 else:
                     raise aiohttp.ClientResponseError(
                         response.request_info,
@@ -262,8 +291,8 @@ class IONAEnergyAPI:
                         raise ValueError("Invalid response format")
 
                 elif response.status == 401:
-                    # Token might be expired, try to refresh
-                    _LOGGER.debug("Received 401, attempting token refresh")
+                    # Token might be expired, try to refresh or re-auth
+                    _LOGGER.debug("Received 401, attempting token refresh or re-auth")
                     await self._ensure_valid_token()
 
                     # Retry the request with new token
@@ -290,12 +319,29 @@ class IONAEnergyAPI:
                             else:
                                 raise ValueError("Invalid response format")
                         else:
-                            raise aiohttp.ClientResponseError(
-                                retry_response.request_info,
-                                retry_response.history,
-                                status=retry_response.status,
-                                message=f"Failed to get power data after token refresh: {retry_response.status}",
-                            )
+                            # Try explicit re-auth then retry once more
+                            await self._reauthenticate_if_possible()
+                            headers = {"Authorization": f"Bearer {self.access_token}"}
+                            async with session.get(url, headers=headers) as second_retry:
+                                if second_retry.status == 200:
+                                    data = await second_retry.json()
+                                    if data.get("status") == "ok" and data.get("data", {}).get(
+                                        "results"
+                                    ):
+                                        results = data["data"]["results"]
+                                        if results:
+                                            latest = results[-1]
+                                            return {
+                                                "power": latest.get("power", 0),
+                                                "timestamp": latest.get("timestamp", ""),
+                                                "unit": "W",
+                                            }
+                                raise aiohttp.ClientResponseError(
+                                    retry_response.request_info,
+                                    retry_response.history,
+                                    status=retry_response.status,
+                                    message=f"Failed to get power data after re-auth: {retry_response.status}",
+                                )
                 else:
                     raise aiohttp.ClientResponseError(
                         response.request_info,
@@ -322,19 +368,25 @@ class IONAEnergyAPI:
                 if response.status == 200:
                     return await response.json()
                 elif response.status == 401:
-                    _LOGGER.debug("Received 401 on meter info, attempting token refresh")
+                    _LOGGER.debug("Received 401 on meter info, attempting token refresh or re-auth")
                     await self._ensure_valid_token()
                     headers = {"Authorization": f"Bearer {self.access_token}"}
                     async with session.get(url, headers=headers) as retry_response:
                         if retry_response.status == 200:
                             return await retry_response.json()
                         else:
-                            raise aiohttp.ClientResponseError(
-                                retry_response.request_info,
-                                retry_response.history,
-                                status=retry_response.status,
-                                message=f"Failed to get meter info after token refresh: {retry_response.status}",
-                            )
+                            # Try explicit re-auth then retry once more
+                            await self._reauthenticate_if_possible()
+                            headers = {"Authorization": f"Bearer {self.access_token}"}
+                            async with session.get(url, headers=headers) as second_retry:
+                                if second_retry.status == 200:
+                                    return await second_retry.json()
+                                raise aiohttp.ClientResponseError(
+                                    retry_response.request_info,
+                                    retry_response.history,
+                                    status=retry_response.status,
+                                    message=f"Failed to get meter info after re-auth: {retry_response.status}",
+                                )
                 else:
                     raise aiohttp.ClientResponseError(
                         response.request_info,
