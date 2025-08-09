@@ -62,24 +62,24 @@ class IONAEnergyAPI:
             _LOGGER.warning("No config entry set, cannot update tokens")
             return
 
-        # Update the config entry data
-        self.config_entry.data = {
+        # Prepare updated data without mutating config_entry.data directly
+        updated_data = {
             **self.config_entry.data,
             CONF_ACCESS_TOKEN: new_tokens.get("access_token"),
             CONF_REFRESH_TOKEN: new_tokens.get("refresh_token"),
             CONF_EXPIRES_IN: new_tokens.get("expires_in"),
         }
 
-        # Update the runtime data
+        # Update the runtime data first
         self.access_token = new_tokens.get("access_token")
         self.refresh_token = new_tokens.get("refresh_token")
         self.expires_in = new_tokens.get("expires_in")
         self.token_created_at = time.time()
         self.last_token_refresh = time.time()
 
-        # Save the updated config entry
+        # Save the updated config entry using the supported API
         self.hass.config_entries.async_update_entry(
-            self.config_entry, data=self.config_entry.data
+            self.config_entry, data=updated_data
         )
         _LOGGER.debug("Updated tokens in config entry")
 
