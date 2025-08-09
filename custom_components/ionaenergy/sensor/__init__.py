@@ -9,6 +9,7 @@ from .sensor import (
     IONAEnergyConnectionSensor,
     IONAEnergyTokenRefreshSensor,
     IONAEnergyPowerSensor,
+    IONAEnergyTotalEnergySensor,
 )
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
@@ -27,6 +28,7 @@ async def async_setup_entry(
             IONAEnergyConnectionSensor(api_client, config_entry),
             IONAEnergyTokenRefreshSensor(api_client, config_entry, hass),
             IONAEnergyPowerSensor(api_client, config_entry),
+            IONAEnergyTotalEnergySensor(api_client, config_entry),
         ],
         True,
     )

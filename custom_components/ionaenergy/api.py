@@ -303,3 +303,42 @@ class IONAEnergyAPI:
                         status=response.status,
                         message=f"Failed to get power data: {response.status}",
                     )
+
+    async def get_meter_info(self) -> dict[str, Any]:
+        """Get meter info data (includes total consumption in Wh)."""
+        # Ensure we have a valid token before making the request
+        await self._ensure_valid_token()
+
+        headers = {"Authorization": f"Bearer {self.access_token}"}
+
+        url = "https://api.n2g-iona.net/v2/meter/info"
+
+        connector = aiohttp.TCPConnector(ssl=self.ssl_context)
+
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    return await response.json()
+                elif response.status == 401:
+                    _LOGGER.debug("Received 401 on meter info, attempting token refresh")
+                    await self._ensure_valid_token()
+                    headers = {"Authorization": f"Bearer {self.access_token}"}
+                    async with session.get(url, headers=headers) as retry_response:
+                        if retry_response.status == 200:
+                            return await retry_response.json()
+                        else:
+                            raise aiohttp.ClientResponseError(
+                                retry_response.request_info,
+                                retry_response.history,
+                                status=retry_response.status,
+                                message=f"Failed to get meter info after token refresh: {retry_response.status}",
+                            )
+                else:
+                    raise aiohttp.ClientResponseError(
+                        response.request_info,
+                        response.history,
+                        status=response.status,
+                        message=f"Failed to get meter info: {response.status}",
+                    )

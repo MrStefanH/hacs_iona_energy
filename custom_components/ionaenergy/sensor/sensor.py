@@ -6,9 +6,13 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorEntity,
+    SensorDeviceClass,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, UnitOfPower
+from homeassistant.const import CONF_NAME, UnitOfPower, UnitOfEnergy
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
@@ -32,6 +36,7 @@ async def async_setup_entry(
             IONAEnergyConnectionSensor(api_client, config_entry),
             IONAEnergyTokenRefreshSensor(api_client, config_entry, hass),
             IONAEnergyPowerSensor(api_client, config_entry),
+            IONAEnergyTotalEnergySensor(api_client, config_entry),
         ],
         True,
     )
@@ -193,5 +198,69 @@ class IONAEnergyPowerSensor(SensorEntity):
 
         except Exception as ex:  # pylint: disable=broad-except
             _LOGGER.error("Error updating iONA Energy power sensor: %s", ex)
+            self._attr_native_value = None
+            self._attr_available = False
+
+
+class IONAEnergyTotalEnergySensor(SensorEntity):
+    """Representation of an iONA Energy total energy consumption sensor (kWh)."""
+
+    def __init__(
+        self, api_client: api.IONAEnergyAPI, config_entry: ConfigEntry
+    ) -> None:
+        """Initialize the total energy sensor."""
+        self.api_client = api_client
+        self.config_entry = config_entry
+        self._attr_name = f"iONA Energy Total Energy"
+        self._attr_unique_id = f"{config_entry.entry_id}_total_energy"
+        self._attr_native_value = None
+        self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+        self._attr_device_class = SensorDeviceClass.ENERGY
+        self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        self._attr_available = False
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return self._attr_name
+
+    @property
+    def native_value(self) -> StateType:
+        """Return the state of the sensor."""
+        return self._attr_native_value
+
+    @property
+    def native_unit_of_measurement(self) -> str:
+        """Return the unit of measurement."""
+        return self._attr_native_unit_of_measurement
+
+    async def async_update(self) -> None:
+        """Fetch new state data for the sensor."""
+        try:
+            meter_info = await self.api_client.get_meter_info()
+
+            if (
+                meter_info
+                and meter_info.get("status") == "ok"
+                and meter_info.get("data", {}).get("Electricity", {}).get("CSD")
+                is not None
+            ):
+                csd_wh = meter_info["data"]["Electricity"]["CSD"]
+                # Convert Wh to kWh
+                energy_kwh = csd_wh / 1000.0
+                self._attr_native_value = energy_kwh
+                self._attr_available = True
+                _LOGGER.debug(
+                    "iONA Energy total energy: %s kWh (serial: %s)",
+                    energy_kwh,
+                    meter_info.get("data", {}).get("Serialnumber", "unknown"),
+                )
+            else:
+                self._attr_native_value = None
+                self._attr_available = False
+                _LOGGER.warning("No meter info available or invalid format")
+
+        except Exception as ex:  # pylint: disable=broad-except
+            _LOGGER.error("Error updating iONA Energy total energy sensor: %s", ex)
             self._attr_native_value = None
             self._attr_available = False
