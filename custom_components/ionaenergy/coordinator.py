@@ -12,11 +12,31 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .api import IONAEnergyAPI
-from .const import DOMAIN
+from .const import DOMAIN, GROSS_SHARE_URL
 
 _LOGGER = logging.getLogger(__name__)
 
 UPDATE_INTERVAL = timedelta(seconds=30)
+
+_INITIALISATION_ENDPOINT = "GET https://api.n2g-iona.net/v2/initialisation"
+
+
+def _log_coordinator_api_error(
+    logger: logging.Logger,
+    human_label: str,
+    technical_detail: str,
+    ex: BaseException,
+) -> None:
+    """Log API/update failures with type + message; full traceback when debug enabled."""
+    msg = str(ex).strip() or repr(ex)
+    logger.error(
+        "%s (%s): [%s] %s",
+        human_label,
+        technical_detail,
+        type(ex).__name__,
+        msg,
+        exc_info=logger.isEnabledFor(logging.DEBUG),
+    )
 
 
 def _meter_serial_from_meter(meter: dict[str, Any] | None) -> str | None:
@@ -110,7 +130,12 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as ex:  # pylint: disable=broad-except
             data["initialisation"] = None
             data["initialisation_error"] = ex
-            _LOGGER.error("Error updating iONA Energy connection sensor: %s", ex)
+            _log_coordinator_api_error(
+                _LOGGER,
+                "iONA Energy connection sensor update failed",
+                _INITIALISATION_ENDPOINT,
+                ex,
+            )
 
         try:
             power = await self.api.get_current_power()
@@ -125,7 +150,12 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as ex:  # pylint: disable=broad-except
             data["power"] = None
             data["power_error"] = ex
-            _LOGGER.error("Error updating iONA Energy power sensor: %s", ex)
+            _log_coordinator_api_error(
+                _LOGGER,
+                "iONA Energy power sensor update failed",
+                "GET https://api.n2g-iona.net/v2/power/…",
+                ex,
+            )
 
         try:
             meter = await self.api.get_meter_info()
@@ -145,7 +175,12 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as ex:  # pylint: disable=broad-except
             data["meter"] = None
             data["meter_error"] = ex
-            _LOGGER.error("Error updating iONA Energy total energy sensor: %s", ex)
+            _log_coordinator_api_error(
+                _LOGGER,
+                "iONA Energy total energy sensor update failed",
+                "GET https://api.n2g-iona.net/v2/meter/info",
+                ex,
+            )
 
         data["gross_share"] = None
         data["gross_share_error"] = None
@@ -169,8 +204,11 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     )
             except Exception as ex:  # pylint: disable=broad-except
                 data["gross_share_error"] = ex
-                _LOGGER.error(
-                    "Error fetching dynamic-tariff gross_share: %s", ex
+                _log_coordinator_api_error(
+                    _LOGGER,
+                    "iONA Energy gross_share (dynamic tariff) fetch failed",
+                    f"GET {GROSS_SHARE_URL}",
+                    ex,
                 )
         else:
             _LOGGER.debug(
