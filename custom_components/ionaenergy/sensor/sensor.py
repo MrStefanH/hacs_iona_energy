@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
 
 from homeassistant.components.sensor import (
     SensorEntity,
@@ -12,46 +11,30 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_NAME, UnitOfPower, UnitOfEnergy
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.const import UnitOfEnergy, UnitOfPower
+from homeassistant.core import callback
 from homeassistant.helpers.typing import StateType
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .. import api
-from ..const import DOMAIN
+from ..coordinator import IONAEnergyDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(
-    hass: HomeAssistant,
-    config_entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
-) -> None:
-    """Set up the iONA Energy sensor platform."""
-    api_client: api.IONAEnergyAPI = config_entry.runtime_data
-
-    async_add_entities(
-        [
-            IONAEnergyConnectionSensor(api_client, config_entry),
-            IONAEnergyTokenRefreshSensor(api_client, config_entry, hass),
-            IONAEnergyPowerSensor(api_client, config_entry),
-            IONAEnergyTotalEnergySensor(api_client, config_entry),
-        ],
-        True,
-    )
-
-
-class IONAEnergyConnectionSensor(SensorEntity):
+class IONAEnergyConnectionSensor(
+    CoordinatorEntity[IONAEnergyDataUpdateCoordinator], SensorEntity
+):
     """Representation of an iONA Energy connection status sensor."""
 
     def __init__(
-        self, api_client: api.IONAEnergyAPI, config_entry: ConfigEntry
+        self,
+        coordinator: IONAEnergyDataUpdateCoordinator,
+        config_entry: ConfigEntry,
     ) -> None:
         """Initialize the connection status sensor."""
-        self.api_client = api_client
+        super().__init__(coordinator)
         self.config_entry = config_entry
-        self._attr_name = f"iONA Energy Connection Status"
+        self._attr_name = "iONA Energy Connection Status"
         self._attr_unique_id = f"{config_entry.entry_id}_connection_status"
         self._attr_native_value = "Unknown"
         self._attr_available = False
@@ -66,34 +49,42 @@ class IONAEnergyConnectionSensor(SensorEntity):
         """Return the state of the sensor."""
         return self._attr_native_value
 
-    async def async_update(self) -> None:
-        """Fetch new state data for the sensor."""
-        try:
-            # Test the connection by attempting to get initialisation data
-            await self.api_client.get_initialisation_data()
-            self._attr_native_value = "Connected"
-            self._attr_available = True
-            _LOGGER.debug("iONA Energy connection status: Connected")
-        except Exception as ex:  # pylint: disable=broad-except
-            _LOGGER.error("Error updating iONA Energy connection sensor: %s", ex)
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self._attr_available
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        data = self.coordinator.data
+        err = data.get("initialisation_error")
+        if err is not None:
             self._attr_native_value = "Disconnected"
             self._attr_available = False
+        elif data.get("initialisation") is not None:
+            self._attr_native_value = "Connected"
+            self._attr_available = True
+        else:
+            self._attr_native_value = "Unknown"
+            self._attr_available = False
+        super()._handle_coordinator_update()
 
 
-class IONAEnergyTokenRefreshSensor(SensorEntity):
+class IONAEnergyTokenRefreshSensor(
+    CoordinatorEntity[IONAEnergyDataUpdateCoordinator], SensorEntity
+):
     """Representation of an iONA Energy token refresh timestamp sensor."""
 
     def __init__(
         self,
-        api_client: api.IONAEnergyAPI,
+        coordinator: IONAEnergyDataUpdateCoordinator,
         config_entry: ConfigEntry,
-        hass: HomeAssistant,
     ) -> None:
         """Initialize the token refresh sensor."""
-        self.api_client = api_client
+        super().__init__(coordinator)
         self.config_entry = config_entry
-        self.hass = hass
-        self._attr_name = f"iONA Energy Last Token Refresh"
+        self._attr_name = "iONA Energy Last Token Refresh"
         self._attr_unique_id = f"{config_entry.entry_id}_token_refresh"
         self._attr_native_value = None
         self._attr_available = False
@@ -108,28 +99,25 @@ class IONAEnergyTokenRefreshSensor(SensorEntity):
         """Return the state of the sensor."""
         return self._attr_native_value
 
-    async def async_update(self) -> None:
-        """Fetch new state data for the sensor."""
-        try:
-            # Check if we have a valid token and get the last refresh time
-            if self.api_client.access_token:
-                # Convert the last token refresh timestamp to a readable datetime
-                # Convert from UTC to local timezone
-                from datetime import timezone
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self._attr_available
 
-                # Get the local timezone from Home Assistant configuration
-                # Use the system's local timezone as fallback
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        try:
+            if self.coordinator.api.access_token:
                 try:
                     import zoneinfo
 
-                    local_tz = zoneinfo.ZoneInfo(self.hass.config.time_zone)
+                    local_tz = zoneinfo.ZoneInfo(self.coordinator.hass.config.time_zone)
                 except (ImportError, zoneinfo.ZoneInfoNotFoundError):
-                    # Fallback to system local timezone
                     local_tz = datetime.now().astimezone().tzinfo
 
-                # Convert UTC timestamp to local time
                 utc_time = datetime.fromtimestamp(
-                    self.api_client.last_token_refresh, tz=timezone.utc
+                    self.coordinator.api.last_token_refresh, tz=timezone.utc
                 )
                 local_time = utc_time.astimezone(local_tz)
 
@@ -145,18 +133,23 @@ class IONAEnergyTokenRefreshSensor(SensorEntity):
             _LOGGER.error("Error updating iONA Energy token refresh sensor: %s", ex)
             self._attr_native_value = "Error"
             self._attr_available = False
+        super()._handle_coordinator_update()
 
 
-class IONAEnergyPowerSensor(SensorEntity):
+class IONAEnergyPowerSensor(
+    CoordinatorEntity[IONAEnergyDataUpdateCoordinator], SensorEntity
+):
     """Representation of an iONA Energy current power consumption sensor."""
 
     def __init__(
-        self, api_client: api.IONAEnergyAPI, config_entry: ConfigEntry
+        self,
+        coordinator: IONAEnergyDataUpdateCoordinator,
+        config_entry: ConfigEntry,
     ) -> None:
         """Initialize the power consumption sensor."""
-        self.api_client = api_client
+        super().__init__(coordinator)
         self.config_entry = config_entry
-        self._attr_name = f"iONA Energy Current Power"
+        self._attr_name = "iONA Energy Current Power"
         self._attr_unique_id = f"{config_entry.entry_id}_current_power"
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = UnitOfPower.WATT
@@ -177,41 +170,44 @@ class IONAEnergyPowerSensor(SensorEntity):
         """Return the unit of measurement."""
         return self._attr_native_unit_of_measurement
 
-    async def async_update(self) -> None:
-        """Fetch new state data for the sensor."""
-        try:
-            # Get current power consumption data
-            power_data = await self.api_client.get_current_power()
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self._attr_available
 
-            if power_data and "power" in power_data:
-                self._attr_native_value = power_data["power"]
-                self._attr_available = True
-                _LOGGER.debug(
-                    "iONA Energy current power: %s W (timestamp: %s)",
-                    power_data["power"],
-                    power_data.get("timestamp", "unknown"),
-                )
-            else:
-                self._attr_native_value = None
-                self._attr_available = False
-                _LOGGER.warning("No power data available")
-
-        except Exception as ex:  # pylint: disable=broad-except
-            _LOGGER.error("Error updating iONA Energy power sensor: %s", ex)
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        data = self.coordinator.data
+        err = data.get("power_error")
+        power_data = data.get("power")
+        if err is not None:
             self._attr_native_value = None
             self._attr_available = False
+        elif power_data and "power" in power_data:
+            self._attr_native_value = power_data["power"]
+            self._attr_available = True
+        else:
+            self._attr_native_value = None
+            self._attr_available = False
+            _LOGGER.warning("No power data available")
+        super()._handle_coordinator_update()
 
 
-class IONAEnergyTotalEnergySensor(SensorEntity):
+class IONAEnergyTotalEnergySensor(
+    CoordinatorEntity[IONAEnergyDataUpdateCoordinator], SensorEntity
+):
     """Representation of an iONA Energy total energy consumption sensor (kWh)."""
 
     def __init__(
-        self, api_client: api.IONAEnergyAPI, config_entry: ConfigEntry
+        self,
+        coordinator: IONAEnergyDataUpdateCoordinator,
+        config_entry: ConfigEntry,
     ) -> None:
         """Initialize the total energy sensor."""
-        self.api_client = api_client
+        super().__init__(coordinator)
         self.config_entry = config_entry
-        self._attr_name = f"iONA Energy Total Energy"
+        self._attr_name = "iONA Energy Total Energy"
         self._attr_unique_id = f"{config_entry.entry_id}_total_energy"
         self._attr_native_value = None
         self._attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
@@ -234,33 +230,30 @@ class IONAEnergyTotalEnergySensor(SensorEntity):
         """Return the unit of measurement."""
         return self._attr_native_unit_of_measurement
 
-    async def async_update(self) -> None:
-        """Fetch new state data for the sensor."""
-        try:
-            meter_info = await self.api_client.get_meter_info()
+    @property
+    def available(self) -> bool:
+        """Return if entity is available."""
+        return self._attr_available
 
-            if (
-                meter_info
-                and meter_info.get("status") == "ok"
-                and meter_info.get("data", {}).get("Electricity", {}).get("CSD")
-                is not None
-            ):
-                csd_wh = meter_info["data"]["Electricity"]["CSD"]
-                # Convert Wh to kWh
-                energy_kwh = csd_wh / 1000.0
-                self._attr_native_value = energy_kwh
-                self._attr_available = True
-                _LOGGER.debug(
-                    "iONA Energy total energy: %s kWh (serial: %s)",
-                    energy_kwh,
-                    meter_info.get("data", {}).get("Serialnumber", "unknown"),
-                )
-            else:
-                self._attr_native_value = None
-                self._attr_available = False
-                _LOGGER.warning("No meter info available or invalid format")
-
-        except Exception as ex:  # pylint: disable=broad-except
-            _LOGGER.error("Error updating iONA Energy total energy sensor: %s", ex)
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        data = self.coordinator.data
+        err = data.get("meter_error")
+        meter_info = data.get("meter")
+        if err is not None:
             self._attr_native_value = None
             self._attr_available = False
+        elif (
+            meter_info
+            and meter_info.get("status") == "ok"
+            and meter_info.get("data", {}).get("Electricity", {}).get("CSD") is not None
+        ):
+            csd_wh = meter_info["data"]["Electricity"]["CSD"]
+            self._attr_native_value = csd_wh / 1000.0
+            self._attr_available = True
+        else:
+            self._attr_native_value = None
+            self._attr_available = False
+            _LOGGER.warning("No meter info available or invalid format")
+        super()._handle_coordinator_update()

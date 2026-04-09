@@ -7,10 +7,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .sensor import (
     IONAEnergyConnectionSensor,
-    IONAEnergyTokenRefreshSensor,
     IONAEnergyPowerSensor,
+    IONAEnergyTokenRefreshSensor,
     IONAEnergyTotalEnergySensor,
 )
+from ..coordinator import IONAEnergyDataUpdateCoordinator
 
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
@@ -21,16 +22,15 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the iONA Energy sensor platform."""
-    api_client = config_entry.runtime_data
+    coordinator: IONAEnergyDataUpdateCoordinator = config_entry.runtime_data
 
     async_add_entities(
         [
-            IONAEnergyConnectionSensor(api_client, config_entry),
-            IONAEnergyTokenRefreshSensor(api_client, config_entry, hass),
-            IONAEnergyPowerSensor(api_client, config_entry),
-            IONAEnergyTotalEnergySensor(api_client, config_entry),
+            IONAEnergyConnectionSensor(coordinator, config_entry),
+            IONAEnergyTokenRefreshSensor(coordinator, config_entry),
+            IONAEnergyPowerSensor(coordinator, config_entry),
+            IONAEnergyTotalEnergySensor(coordinator, config_entry),
         ],
-        True,
     )
 
 

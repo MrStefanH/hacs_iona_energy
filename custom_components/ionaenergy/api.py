@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import ssl
 import time
 from typing import Any
 
 import aiohttp
-from aiohttp import ClientSession
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -46,6 +46,10 @@ class IONAEnergyAPI:
         self.ssl_context = ssl.create_default_context()
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
+
+        # Serialize token refresh / login so parallel API calls cannot invalidate
+        # the same refresh_token concurrently.
+        self._token_lock = asyncio.Lock()
 
     def set_config_entry(self, config_entry: ConfigEntry) -> None:
         """Set the config entry for token updates."""
@@ -87,15 +91,13 @@ class IONAEnergyAPI:
         )
         _LOGGER.debug("Updated tokens in config entry")
 
-    async def _ensure_valid_token(self) -> None:
-        """Ensure we have a valid access token, refresh if necessary."""
+    async def _ensure_valid_token_unlocked(self) -> None:
+        """Ensure valid access token (caller must hold _token_lock)."""
         if not self.access_token:
-            # Attempt full re-authentication if possible
             _LOGGER.debug("No access token available, attempting re-authentication")
             await self._reauthenticate_if_possible()
             return
 
-        # Check if token is expired or will expire soon
         if self._is_token_expired():
             _LOGGER.debug("Token expired or expiring soon, refreshing")
             try:
@@ -107,8 +109,13 @@ class IONAEnergyAPI:
                 )
                 await self._reauthenticate_if_possible()
 
-    async def authenticate(self, username: str, password: str) -> dict[str, Any]:
-        """Authenticate with iONA Energy."""
+    async def _ensure_valid_token(self) -> None:
+        """Ensure we have a valid access token, refresh if necessary."""
+        async with self._token_lock:
+            await self._ensure_valid_token_unlocked()
+
+    async def _authenticate_impl(self, username: str, password: str) -> dict[str, Any]:
+        """Authenticate with iONA Energy (no lock — use authenticate() from outside)."""
         auth_data = {
             "method": "login",
             "username": username,
@@ -123,26 +130,33 @@ class IONAEnergyAPI:
             async with session.post(AUTH_URL, json=auth_data) as response:
                 if response.status == 200:
                     tokens = await response.json()
-                    # Set token creation time for new tokens
                     self.token_created_at = time.time()
                     self.last_token_refresh = time.time()
-                    # Persist tokens and update runtime
                     await self._update_tokens_in_config_entry(tokens)
                     return tokens
-                else:
-                    raise aiohttp.ClientResponseError(
-                        response.request_info,
-                        response.history,
-                        status=response.status,
-                        message=f"Authentication failed: {response.status}",
-                    )
+                raise aiohttp.ClientResponseError(
+                    response.request_info,
+                    response.history,
+                    status=response.status,
+                    message=f"Authentication failed: {response.status}",
+                )
+
+    async def authenticate(self, username: str, password: str) -> dict[str, Any]:
+        """Authenticate with iONA Energy."""
+        async with self._token_lock:
+            return await self._authenticate_impl(username, password)
 
     async def _reauthenticate_if_possible(self) -> dict[str, Any]:
         """Attempt to re-authenticate using stored credentials if available."""
         if not self.username or not self.password:
             raise ValueError("No stored credentials available for re-authentication")
         _LOGGER.debug("Attempting full re-authentication with stored credentials")
-        return await self.authenticate(self.username, self.password)
+        return await self._authenticate_impl(self.username, self.password)
+
+    async def _reauthenticate_with_lock(self) -> dict[str, Any]:
+        """Re-login while holding the token lock (401 retry paths; not under lock yet)."""
+        async with self._token_lock:
+            return await self._reauthenticate_if_possible()
 
     async def refresh_access_token(self) -> dict[str, Any]:
         """Refresh the access token using the refresh token."""
@@ -219,7 +233,7 @@ class IONAEnergyAPI:
                             return await retry_response.json()
                         else:
                             # Try explicit re-auth then retry once more
-                            await self._reauthenticate_if_possible()
+                            await self._reauthenticate_with_lock()
                             headers = {"Authorization": f"Bearer {self.access_token}"}
                             async with session.get(
                                 "https://api.n2g-iona.net/v2/initialisation",
@@ -320,7 +334,7 @@ class IONAEnergyAPI:
                                 raise ValueError("Invalid response format")
                         else:
                             # Try explicit re-auth then retry once more
-                            await self._reauthenticate_if_possible()
+                            await self._reauthenticate_with_lock()
                             headers = {"Authorization": f"Bearer {self.access_token}"}
                             async with session.get(url, headers=headers) as second_retry:
                                 if second_retry.status == 200:
@@ -376,7 +390,7 @@ class IONAEnergyAPI:
                             return await retry_response.json()
                         else:
                             # Try explicit re-auth then retry once more
-                            await self._reauthenticate_if_possible()
+                            await self._reauthenticate_with_lock()
                             headers = {"Authorization": f"Bearer {self.access_token}"}
                             async with session.get(url, headers=headers) as second_retry:
                                 if second_retry.status == 200:

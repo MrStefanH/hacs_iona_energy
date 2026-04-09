@@ -7,15 +7,18 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 
 from . import api
+from .coordinator import IONAEnergyDataUpdateCoordinator
 
 _PLATFORMS: list[Platform] = [Platform.SENSOR]
 
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up iONA Energy from a config entry."""
-    # Create API client and set the config entry for token updates
     api_client = api.IONAEnergyAPI(hass, entry.data)
     api_client.set_config_entry(entry)
-    entry.runtime_data = api_client
+    coordinator = IONAEnergyDataUpdateCoordinator(hass, entry, api_client)
+    await coordinator.async_config_entry_first_refresh()
+    entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, _PLATFORMS)
 
