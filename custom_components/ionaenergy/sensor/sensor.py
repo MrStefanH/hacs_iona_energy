@@ -6,8 +6,8 @@ import logging
 from datetime import datetime, timezone
 
 from homeassistant.components.sensor import (
-    SensorEntity,
     SensorDeviceClass,
+    SensorEntity,
     SensorStateClass,
 )
 from homeassistant.config_entries import ConfigEntry
@@ -191,6 +191,86 @@ class IONAEnergyPowerSensor(
             self._attr_native_value = None
             self._attr_available = False
             _LOGGER.warning("No power data available")
+        super()._handle_coordinator_update()
+
+
+class IONAEnergyGrossShareSensor(
+    CoordinatorEntity[IONAEnergyDataUpdateCoordinator], SensorEntity
+):
+    """Dynamic-tariff gross_share (ct/kWh) from SDACe hub."""
+
+    _attr_suggested_display_precision = 5
+
+    def __init__(
+        self,
+        coordinator: IONAEnergyDataUpdateCoordinator,
+        config_entry: ConfigEntry,
+    ) -> None:
+        """Initialize gross_share sensor."""
+        super().__init__(coordinator)
+        self.config_entry = config_entry
+        self._attr_name = "iONA Energy Gross Share"
+        self._attr_unique_id = f"{config_entry.entry_id}_gross_share"
+        self._attr_native_value: float | None = None
+        self._attr_native_unit_of_measurement = "ct/kWh"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_available = False
+        self._attr_extra_state_attributes: dict[str, str | None] = {}
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return self._attr_name
+
+    @property
+    def native_value(self) -> StateType:
+        """Return gross_share value."""
+        return self._attr_native_value
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return unit."""
+        return self._attr_native_unit_of_measurement
+
+    @property
+    def available(self) -> bool:
+        """Return availability."""
+        return self._attr_available
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | None]:
+        """Last update time and meter id from API."""
+        return self._attr_extra_state_attributes
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        data = self.coordinator.data
+        err = data.get("gross_share_error")
+        payload = data.get("gross_share")
+
+        if err is not None:
+            self._attr_native_value = None
+            self._attr_available = False
+            self._attr_extra_state_attributes = {}
+        elif payload and "gross_share" in payload:
+            try:
+                self._attr_native_value = float(payload["gross_share"])
+            except (TypeError, ValueError):
+                self._attr_native_value = None
+                self._attr_available = False
+                self._attr_extra_state_attributes = {}
+                super()._handle_coordinator_update()
+                return
+            self._attr_available = True
+            self._attr_extra_state_attributes = {
+                "last_updated": payload.get("last_updated"),
+                "meter_serial_number": payload.get("meter_serial_number"),
+            }
+        else:
+            self._attr_native_value = None
+            self._attr_available = False
+            self._attr_extra_state_attributes = {}
         super()._handle_coordinator_update()
 
 

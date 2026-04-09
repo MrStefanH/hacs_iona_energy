@@ -6,6 +6,7 @@ import asyncio
 import logging
 import ssl
 import time
+import urllib.parse
 from typing import Any
 
 import aiohttp
@@ -15,7 +16,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD
 
-from .const import AUTH_URL, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN, CONF_EXPIRES_IN
+from .const import (
+    AUTH_URL,
+    CONF_ACCESS_TOKEN,
+    CONF_EXPIRES_IN,
+    CONF_REFRESH_TOKEN,
+    GROSS_SHARE_URL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -408,3 +415,66 @@ class IONAEnergyAPI:
                         status=response.status,
                         message=f"Failed to get meter info: {response.status}",
                     )
+
+    async def get_gross_share(
+        self,
+        meter_serial_number: str,
+        *,
+        is_test: bool = False,
+    ) -> dict[str, Any]:
+        """Fetch dynamic-tariff gross_share (ct/kWh uplift).
+
+        meter_serial_number must match the app: hashed id (e.g. SHA-256 hex of
+        UTF-8 Serialnumber) or hashedMeterSerialNumber from initialisation.
+        """
+        await self._ensure_valid_token()
+
+        query = urllib.parse.urlencode(
+            {
+                "meter_serial_number": meter_serial_number,
+                "is_test": str(is_test).lower(),
+            }
+        )
+        url = f"{GROSS_SHARE_URL}?{query}"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Accept": "application/json",
+        }
+
+        connector = aiohttp.TCPConnector(ssl=self.ssl_context)
+
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    return await response.json()
+                if response.status == 401:
+                    _LOGGER.debug(
+                        "401 on gross_share, refreshing token and retrying"
+                    )
+                    await self._ensure_valid_token()
+                    headers["Authorization"] = f"Bearer {self.access_token}"
+                    async with session.get(url, headers=headers) as retry_response:
+                        if retry_response.status == 200:
+                            return await retry_response.json()
+                        await self._reauthenticate_with_lock()
+                        headers["Authorization"] = f"Bearer {self.access_token}"
+                        async with session.get(url, headers=headers) as second_retry:
+                            if second_retry.status == 200:
+                                return await second_retry.json()
+                            raise aiohttp.ClientResponseError(
+                                retry_response.request_info,
+                                retry_response.history,
+                                status=retry_response.status,
+                                message=(
+                                    "Failed to get gross_share after re-auth: "
+                                    f"{retry_response.status}"
+                                ),
+                            )
+                raise aiohttp.ClientResponseError(
+                    response.request_info,
+                    response.history,
+                    status=response.status,
+                    message=f"Failed to get gross_share: {response.status}",
+                )
