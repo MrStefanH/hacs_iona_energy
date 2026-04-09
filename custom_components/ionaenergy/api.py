@@ -48,9 +48,9 @@ class IONAEnergyAPI:
         # Track last token refresh time for sensor
         self.last_token_refresh = time.time()
 
-        # Create SSL context that skips certificate verification
-        # This is a temporary workaround for SSL certificate issues
-        self.ssl_context = ssl.create_default_context()
+        # TLS client context without loading system CA bundle (avoids blocking
+        # load_default_certs in the event loop; verification is disabled below).
+        self.ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         self.ssl_context.check_hostname = False
         self.ssl_context.verify_mode = ssl.CERT_NONE
 
