@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .api import IONAEnergyAPI
-from .const import DOMAIN, GROSS_SHARE_URL
+from .const import DOMAIN, GROSS_SHARE_URL, SPOT_PRICES_URL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,6 +97,87 @@ def _route_to_enviam_test(initialisation: dict[str, Any] | None) -> bool:
     if isinstance(raw, bool):
         return raw
     return str(raw).strip().lower() in ("true", "1", "yes")
+
+
+def _parse_spot_ts(raw: str) -> datetime | None:
+    """Parse EnviaM EEX spot timestamp (ISO with offset)."""
+    if not raw or not str(raw).strip():
+        return None
+    s = str(raw).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _current_spot_ct_kwh(
+    payload: dict[str, Any] | None,
+    *,
+    now: datetime,
+) -> tuple[float | None, dict[str, Any]]:
+    """Pick the 15-minute slot valid at ``now``; value is API price / 10 (ct/kWh)."""
+    if not payload or not isinstance(payload.get("pricePoints"), list):
+        return None, {}
+
+    points: list[dict[str, Any]] = [
+        p for p in payload["pricePoints"] if isinstance(p, dict)
+    ]
+    if not points:
+        return None, {}
+
+    parsed: list[tuple[datetime, float]] = []
+    for p in points:
+        ts = _parse_spot_ts(str(p.get("timestamp", "")))
+        if ts is None:
+            continue
+        try:
+            price = float(p["price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        parsed.append((ts, price))
+
+    if not parsed:
+        return None, {}
+
+    parsed.sort(key=lambda x: x[0])
+    now_aware = dt_util.as_local(now) if now.tzinfo is None else now
+    now_utc = now_aware.astimezone(timezone.utc)
+    slot_len = timedelta(minutes=15)
+
+    chosen_ts: datetime | None = None
+    chosen_raw: float | None = None
+    for ts, price in parsed:
+        ts_utc = ts.astimezone(timezone.utc)
+        if ts_utc <= now_utc < ts_utc + slot_len:
+            chosen_ts = ts
+            chosen_raw = price
+            break
+
+    attrs: dict[str, Any] = {
+        "time_slice": payload.get("timeSlice"),
+        "average_ct_per_kwh": None,
+        "interval_start": None,
+        "interval_end": None,
+        "raw_price": None,
+    }
+    try:
+        if payload.get("average") is not None:
+            attrs["average_ct_per_kwh"] = float(payload["average"]) / 10.0
+    except (TypeError, ValueError):
+        pass
+
+    if chosen_ts is not None and chosen_raw is not None:
+        attrs["interval_start"] = chosen_ts.isoformat()
+        attrs["interval_end"] = (chosen_ts + slot_len).isoformat()
+        attrs["raw_price"] = chosen_raw
+        return chosen_raw / 10.0, attrs
+
+    return None, attrs
 
 
 class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -214,6 +296,28 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.debug(
                 "Skipping gross_share: no hashedMeterSerialNumber in init "
                 "and no Serialnumber in /v2/meter/info"
+            )
+
+        data["spot_prices"] = None
+        data["spot_prices_error"] = None
+        data["spot_price"] = None
+        try:
+            raw_spot = await self.api.get_spot_prices_today()
+            data["spot_prices"] = raw_spot
+            ct_val, spot_attrs = _current_spot_ct_kwh(
+                raw_spot if isinstance(raw_spot, dict) else None,
+                now=dt_util.now(),
+            )
+            data["spot_price"] = {"ct_per_kwh": ct_val, **spot_attrs}
+            if ct_val is not None:
+                _LOGGER.debug("iONA Energy EEX spot (current slot): %s ct/kWh", ct_val)
+        except Exception as ex:  # pylint: disable=broad-except
+            data["spot_prices_error"] = ex
+            _log_coordinator_api_error(
+                _LOGGER,
+                "iONA Energy EEX spot price fetch failed",
+                f"GET {SPOT_PRICES_URL}?timeSlice=today",
+                ex,
             )
 
         return data

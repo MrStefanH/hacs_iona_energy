@@ -22,6 +22,8 @@ from .const import (
     CONF_EXPIRES_IN,
     CONF_REFRESH_TOKEN,
     GROSS_SHARE_URL,
+    SPOT_PRICES_IDENTITY_HEADER,
+    SPOT_PRICES_URL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -477,4 +479,53 @@ class IONAEnergyAPI:
                     response.history,
                     status=response.status,
                     message=f"Failed to get gross_share: {response.status}",
+                )
+
+    async def get_spot_prices_today(self) -> dict[str, Any]:
+        """Fetch EEX spot prices for today (15-minute resolution)."""
+        await self._ensure_valid_token()
+
+        url = f"{SPOT_PRICES_URL}?{urllib.parse.urlencode({'timeSlice': 'today'})}"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Accept": "application/json",
+            "x-identity": SPOT_PRICES_IDENTITY_HEADER,
+        }
+
+        connector = aiohttp.TCPConnector(ssl=self.ssl_context)
+
+        async with aiohttp.ClientSession(
+            connector=connector, timeout=aiohttp.ClientTimeout(total=30)
+        ) as session:
+            async with session.get(url, headers=headers) as response:
+                if response.status == 200:
+                    return await response.json()
+                if response.status == 401:
+                    _LOGGER.debug(
+                        "401 on spot prices, refreshing token and retrying"
+                    )
+                    await self._ensure_valid_token()
+                    headers["Authorization"] = f"Bearer {self.access_token}"
+                    async with session.get(url, headers=headers) as retry_response:
+                        if retry_response.status == 200:
+                            return await retry_response.json()
+                        await self._reauthenticate_with_lock()
+                        headers["Authorization"] = f"Bearer {self.access_token}"
+                        async with session.get(url, headers=headers) as second_retry:
+                            if second_retry.status == 200:
+                                return await second_retry.json()
+                            raise aiohttp.ClientResponseError(
+                                retry_response.request_info,
+                                retry_response.history,
+                                status=retry_response.status,
+                                message=(
+                                    "Failed to get spot prices after re-auth: "
+                                    f"{retry_response.status}"
+                                ),
+                            )
+                raise aiohttp.ClientResponseError(
+                    response.request_info,
+                    response.history,
+                    status=response.status,
+                    message=f"Failed to get spot prices: {response.status}",
                 )

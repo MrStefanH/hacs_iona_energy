@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -271,6 +272,95 @@ class IONAEnergyGrossShareSensor(
             self._attr_native_value = None
             self._attr_available = False
             self._attr_extra_state_attributes = {}
+        super()._handle_coordinator_update()
+
+
+class IONAEnergyEexSpotPriceSensor(
+    CoordinatorEntity[IONAEnergyDataUpdateCoordinator], SensorEntity
+):
+    """Current EEX day-ahead spot (15-minute slot), API value / 10 → ct/kWh."""
+
+    _attr_suggested_display_precision = 3
+
+    def __init__(
+        self,
+        coordinator: IONAEnergyDataUpdateCoordinator,
+        config_entry: ConfigEntry,
+    ) -> None:
+        """Initialize EEX spot price sensor."""
+        super().__init__(coordinator)
+        self.config_entry = config_entry
+        self._attr_name = "iONA Energy EEX Spot Price"
+        self._attr_unique_id = f"{config_entry.entry_id}_eex_spot_price"
+        self._attr_native_value: float | None = None
+        self._attr_native_unit_of_measurement = "ct/kWh"
+        self._attr_state_class = SensorStateClass.MEASUREMENT
+        self._attr_available = False
+        self._attr_extra_state_attributes: dict[str, Any] = {}
+
+    @property
+    def name(self) -> str:
+        """Return the name of the sensor."""
+        return self._attr_name
+
+    @property
+    def native_value(self) -> StateType:
+        """Return spot price in ct/kWh."""
+        return self._attr_native_value
+
+    @property
+    def native_unit_of_measurement(self) -> str | None:
+        """Return unit."""
+        return self._attr_native_unit_of_measurement
+
+    @property
+    def available(self) -> bool:
+        """Return availability."""
+        return self._attr_available
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Interval, day average, raw API price for the slot."""
+        return self._attr_extra_state_attributes
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Handle updated data from the coordinator."""
+        err = self.coordinator.data.get("spot_prices_error")
+        payload = self.coordinator.data.get("spot_price")
+
+        if err is not None:
+            self._attr_native_value = None
+            self._attr_available = False
+            self._attr_extra_state_attributes = {}
+        elif isinstance(payload, dict) and payload.get("ct_per_kwh") is not None:
+            try:
+                self._attr_native_value = float(payload["ct_per_kwh"])
+            except (TypeError, ValueError):
+                self._attr_native_value = None
+                self._attr_available = False
+                self._attr_extra_state_attributes = {}
+                super()._handle_coordinator_update()
+                return
+            self._attr_available = True
+            self._attr_extra_state_attributes = {
+                k: payload.get(k)
+                for k in (
+                    "time_slice",
+                    "average_ct_per_kwh",
+                    "interval_start",
+                    "interval_end",
+                    "raw_price",
+                )
+            }
+        else:
+            self._attr_native_value = None
+            self._attr_available = False
+            self._attr_extra_state_attributes = (
+                {k: payload.get(k) for k in ("time_slice", "average_ct_per_kwh")}
+                if isinstance(payload, dict)
+                else {}
+            )
         super()._handle_coordinator_update()
 
 

@@ -7,6 +7,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .sensor import (
     IONAEnergyConnectionSensor,
+    IONAEnergyEexSpotPriceSensor,
     IONAEnergyGrossShareSensor,
     IONAEnergyPowerSensor,
     IONAEnergyTokenRefreshSensor,
@@ -32,6 +33,7 @@ async def async_setup_entry(
             IONAEnergyPowerSensor(coordinator, config_entry),
             IONAEnergyTotalEnergySensor(coordinator, config_entry),
             IONAEnergyGrossShareSensor(coordinator, config_entry),
+            IONAEnergyEexSpotPriceSensor(coordinator, config_entry),
         ],
     )
 
