@@ -13,7 +13,12 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .api import IONAEnergyAPI
-from .const import DOMAIN, GROSS_SHARE_URL, SPOT_PRICES_URL
+from .const import (
+    DOMAIN,
+    GROSS_SHARE_URL,
+    SPOT_PRICES_TIME_SLICE,
+    SPOT_PRICES_URL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -162,19 +167,20 @@ def _build_spot_curve(
     *,
     now: datetime,
 ) -> dict[str, Any] | None:
-    """Full-day slots, remaining-from-now, and ct/kWh at common future offsets."""
+    """All slots in the payload, remaining-from-now, price_points, future offsets."""
     parsed = _sorted_spot_points(payload)
     if not parsed:
         return None
 
     slot_len = timedelta(minutes=15)
     slot_rows: list[tuple[datetime, datetime, float, float]] = []
-    slots_today: list[dict[str, Any]] = []
+    slots_all: list[dict[str, Any]] = []
+    price_points: list[dict[str, Any]] = []
     for ts, raw in parsed:
         end = ts + slot_len
         ct = raw / 10.0
         slot_rows.append((ts, end, raw, ct))
-        slots_today.append(
+        slots_all.append(
             {
                 "slot_start": ts.isoformat(),
                 "slot_end": end.isoformat(),
@@ -182,25 +188,37 @@ def _build_spot_curve(
                 "raw_price": raw,
             }
         )
+        price_points.append(
+            {
+                "timestamp": ts.isoformat(),
+                "price": raw,
+                "ct_per_kwh": ct,
+            }
+        )
 
     now_aware = dt_util.as_local(now) if now.tzinfo is None else now
     now_utc = now_aware.astimezone(timezone.utc)
 
     slots_from_now: list[dict[str, Any]] = []
-    for row in slots_today:
-        end = _parse_spot_ts(str(row["slot_end"]))
-        if end is None:
+    for row in slots_all:
+        end_dt = _parse_spot_ts(str(row["slot_end"]))
+        if end_dt is None:
             continue
-        if end.astimezone(timezone.utc) > now_utc:
+        if end_dt.astimezone(timezone.utc) > now_utc:
             slots_from_now.append(row)
 
+    n_slots = len(slots_all)
     out: dict[str, Any] = {
         "time_slice": payload.get("timeSlice") if isinstance(payload, dict) else None,
         "average_ct_per_kwh": None,
-        "slots_today": slots_today,
+        "price_points": price_points,
+        "slots": slots_all,
+        "slots_today": slots_all,
         "slots_from_now": slots_from_now,
-        "slots_today_count": len(slots_today),
+        "slots_count": n_slots,
+        "slots_today_count": n_slots,
         "slots_from_now_count": len(slots_from_now),
+        "price_points_count": len(price_points),
     }
     try:
         if isinstance(payload, dict) and payload.get("average") is not None:
@@ -384,7 +402,7 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data["spot_prices_error"] = None
         data["spot_price"] = None
         try:
-            raw_spot = await self.api.get_spot_prices_today()
+            raw_spot = await self.api.get_spot_prices(SPOT_PRICES_TIME_SLICE)
             data["spot_prices"] = raw_spot
             spot_payload = raw_spot if isinstance(raw_spot, dict) else None
             now = dt_util.now()
@@ -398,7 +416,7 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _log_coordinator_api_error(
                 _LOGGER,
                 "iONA Energy EEX spot price fetch failed",
-                f"GET {SPOT_PRICES_URL}?timeSlice=today",
+                f"GET {SPOT_PRICES_URL}?timeSlice={SPOT_PRICES_TIME_SLICE}",
                 ex,
             )
 

@@ -15,6 +15,8 @@ SPOT_PRICES_URL = (
     "https://api.enviam.de/shared/v2/enviaM/service/eex/v1/spotPrices"
 )
 SPOT_PRICES_IDENTITY_HEADER = "net2grid"
+# EnviaM query value (e.g. today, twodays) — lowercase per API examples
+SPOT_PRICES_TIME_SLICE = "twodays"
 
 # Configuration keys
 CONF_ACCESS_TOKEN = "access_token"

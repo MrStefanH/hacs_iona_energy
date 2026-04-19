@@ -23,6 +23,7 @@ from .const import (
     CONF_REFRESH_TOKEN,
     GROSS_SHARE_URL,
     SPOT_PRICES_IDENTITY_HEADER,
+    SPOT_PRICES_TIME_SLICE,
     SPOT_PRICES_URL,
 )
 
@@ -481,11 +482,12 @@ class IONAEnergyAPI:
                     message=f"Failed to get gross_share: {response.status}",
                 )
 
-    async def get_spot_prices_today(self) -> dict[str, Any]:
-        """Fetch EEX spot prices for today (15-minute resolution)."""
+    async def get_spot_prices(self, time_slice: str | None = None) -> dict[str, Any]:
+        """Fetch EEX spot prices (15-minute resolution) for the given timeSlice."""
         await self._ensure_valid_token()
 
-        url = f"{SPOT_PRICES_URL}?{urllib.parse.urlencode({'timeSlice': 'today'})}"
+        slice_param = time_slice if time_slice is not None else SPOT_PRICES_TIME_SLICE
+        url = f"{SPOT_PRICES_URL}?{urllib.parse.urlencode({'timeSlice': slice_param})}"
         headers = {
             "Authorization": f"Bearer {self.access_token}",
             "Accept": "application/json",
