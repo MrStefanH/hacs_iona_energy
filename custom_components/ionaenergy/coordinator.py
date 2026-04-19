@@ -115,20 +115,16 @@ def _parse_spot_ts(raw: str) -> datetime | None:
     return dt
 
 
-def _current_spot_ct_kwh(
-    payload: dict[str, Any] | None,
-    *,
-    now: datetime,
-) -> tuple[float | None, dict[str, Any]]:
-    """Pick the 15-minute slot valid at ``now``; value is API price / 10 (ct/kWh)."""
+def _sorted_spot_points(payload: dict[str, Any] | None) -> list[tuple[datetime, float]]:
+    """Return sorted (slot_start, raw_api_price) for all valid price points."""
     if not payload or not isinstance(payload.get("pricePoints"), list):
-        return None, {}
+        return []
 
     points: list[dict[str, Any]] = [
         p for p in payload["pricePoints"] if isinstance(p, dict)
     ]
     if not points:
-        return None, {}
+        return []
 
     parsed: list[tuple[datetime, float]] = []
     for p in points:
@@ -142,9 +138,95 @@ def _current_spot_ct_kwh(
         parsed.append((ts, price))
 
     if not parsed:
+        return []
+    parsed.sort(key=lambda x: x[0])
+    return parsed
+
+
+def _spot_ct_at_instant(
+    slot_rows: list[tuple[datetime, datetime, float, float]],
+    instant: datetime,
+) -> float | None:
+    """Return ct/kWh for the 15-minute row covering ``instant`` (UTC compare)."""
+    instant_utc = instant.astimezone(timezone.utc)
+    for start, end, _raw, ct in slot_rows:
+        su = start.astimezone(timezone.utc)
+        eu = end.astimezone(timezone.utc)
+        if su <= instant_utc < eu:
+            return ct
+    return None
+
+
+def _build_spot_curve(
+    payload: dict[str, Any] | None,
+    *,
+    now: datetime,
+) -> dict[str, Any] | None:
+    """Full-day slots, remaining-from-now, and ct/kWh at common future offsets."""
+    parsed = _sorted_spot_points(payload)
+    if not parsed:
+        return None
+
+    slot_len = timedelta(minutes=15)
+    slot_rows: list[tuple[datetime, datetime, float, float]] = []
+    slots_today: list[dict[str, Any]] = []
+    for ts, raw in parsed:
+        end = ts + slot_len
+        ct = raw / 10.0
+        slot_rows.append((ts, end, raw, ct))
+        slots_today.append(
+            {
+                "slot_start": ts.isoformat(),
+                "slot_end": end.isoformat(),
+                "ct_per_kwh": ct,
+                "raw_price": raw,
+            }
+        )
+
+    now_aware = dt_util.as_local(now) if now.tzinfo is None else now
+    now_utc = now_aware.astimezone(timezone.utc)
+
+    slots_from_now: list[dict[str, Any]] = []
+    for row in slots_today:
+        end = _parse_spot_ts(str(row["slot_end"]))
+        if end is None:
+            continue
+        if end.astimezone(timezone.utc) > now_utc:
+            slots_from_now.append(row)
+
+    out: dict[str, Any] = {
+        "time_slice": payload.get("timeSlice") if isinstance(payload, dict) else None,
+        "average_ct_per_kwh": None,
+        "slots_today": slots_today,
+        "slots_from_now": slots_from_now,
+        "slots_today_count": len(slots_today),
+        "slots_from_now_count": len(slots_from_now),
+    }
+    try:
+        if isinstance(payload, dict) and payload.get("average") is not None:
+            out["average_ct_per_kwh"] = float(payload["average"]) / 10.0
+    except (TypeError, ValueError):
+        pass
+
+    for hours in (1, 2, 3, 6, 12):
+        key = f"price_in_{hours}h_ct_per_kwh"
+        out[key] = _spot_ct_at_instant(
+            slot_rows, now_aware + timedelta(hours=hours)
+        )
+
+    return out
+
+
+def _current_spot_ct_kwh(
+    payload: dict[str, Any] | None,
+    *,
+    now: datetime,
+) -> tuple[float | None, dict[str, Any]]:
+    """Pick the 15-minute slot valid at ``now``; value is API price / 10 (ct/kWh)."""
+    parsed = _sorted_spot_points(payload)
+    if not parsed:
         return None, {}
 
-    parsed.sort(key=lambda x: x[0])
     now_aware = dt_util.as_local(now) if now.tzinfo is None else now
     now_utc = now_aware.astimezone(timezone.utc)
     slot_len = timedelta(minutes=15)
@@ -159,14 +241,14 @@ def _current_spot_ct_kwh(
             break
 
     attrs: dict[str, Any] = {
-        "time_slice": payload.get("timeSlice"),
+        "time_slice": payload.get("timeSlice") if isinstance(payload, dict) else None,
         "average_ct_per_kwh": None,
         "interval_start": None,
         "interval_end": None,
         "raw_price": None,
     }
     try:
-        if payload.get("average") is not None:
+        if isinstance(payload, dict) and payload.get("average") is not None:
             attrs["average_ct_per_kwh"] = float(payload["average"]) / 10.0
     except (TypeError, ValueError):
         pass
@@ -304,11 +386,11 @@ class IONAEnergyDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             raw_spot = await self.api.get_spot_prices_today()
             data["spot_prices"] = raw_spot
-            ct_val, spot_attrs = _current_spot_ct_kwh(
-                raw_spot if isinstance(raw_spot, dict) else None,
-                now=dt_util.now(),
-            )
-            data["spot_price"] = {"ct_per_kwh": ct_val, **spot_attrs}
+            spot_payload = raw_spot if isinstance(raw_spot, dict) else None
+            now = dt_util.now()
+            ct_val, spot_attrs = _current_spot_ct_kwh(spot_payload, now=now)
+            curve = _build_spot_curve(spot_payload, now=now) or {}
+            data["spot_price"] = {"ct_per_kwh": ct_val, **spot_attrs, **curve}
             if ct_val is not None:
                 _LOGGER.debug("iONA Energy EEX spot (current slot): %s ct/kWh", ct_val)
         except Exception as ex:  # pylint: disable=broad-except

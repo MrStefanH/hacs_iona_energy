@@ -278,7 +278,7 @@ class IONAEnergyGrossShareSensor(
 class IONAEnergyEexSpotPriceSensor(
     CoordinatorEntity[IONAEnergyDataUpdateCoordinator], SensorEntity
 ):
-    """Current EEX day-ahead spot (15-minute slot), API value / 10 → ct/kWh."""
+    """Current EEX spot (ct/kWh); attributes include day curve and price_in_*h."""
 
     _attr_suggested_display_precision = 3
 
@@ -320,7 +320,7 @@ class IONAEnergyEexSpotPriceSensor(
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Interval, day average, raw API price for the slot."""
+        """Current slot, day average, full curve, and price_in_*h (ct/kWh)."""
         return self._attr_extra_state_attributes
 
     @callback
@@ -333,34 +333,29 @@ class IONAEnergyEexSpotPriceSensor(
             self._attr_native_value = None
             self._attr_available = False
             self._attr_extra_state_attributes = {}
-        elif isinstance(payload, dict) and payload.get("ct_per_kwh") is not None:
-            try:
-                self._attr_native_value = float(payload["ct_per_kwh"])
-            except (TypeError, ValueError):
-                self._attr_native_value = None
-                self._attr_available = False
-                self._attr_extra_state_attributes = {}
-                super()._handle_coordinator_update()
-                return
-            self._attr_available = True
+        elif isinstance(payload, dict):
             self._attr_extra_state_attributes = {
-                k: payload.get(k)
-                for k in (
-                    "time_slice",
-                    "average_ct_per_kwh",
-                    "interval_start",
-                    "interval_end",
-                    "raw_price",
-                )
+                k: v for k, v in payload.items() if k != "ct_per_kwh"
             }
+            has_curve = bool(
+                payload.get("slots_today") or payload.get("slots_from_now")
+            )
+            ct = payload.get("ct_per_kwh")
+            if ct is not None:
+                try:
+                    self._attr_native_value = float(ct)
+                except (TypeError, ValueError):
+                    self._attr_native_value = None
+                    self._attr_available = has_curve
+                else:
+                    self._attr_available = True
+            else:
+                self._attr_native_value = None
+                self._attr_available = has_curve
         else:
             self._attr_native_value = None
             self._attr_available = False
-            self._attr_extra_state_attributes = (
-                {k: payload.get(k) for k in ("time_slice", "average_ct_per_kwh")}
-                if isinstance(payload, dict)
-                else {}
-            )
+            self._attr_extra_state_attributes = {}
         super()._handle_coordinator_update()
 
 
